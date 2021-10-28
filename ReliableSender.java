@@ -1,12 +1,10 @@
 import java.net.InetAddress;
 import java.net.SocketException;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.Collection;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.ArrayList;
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -25,10 +23,10 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
     // This allows us to stop sending packets when the buffer is full and will continue when the buffer has space.
     // This is in line with the comment from the textbook. It could throw an exception and have a loop that repeatedly tries
     // to add, or, the chosen approach, block the thread and wait.
-    private final LinkedBlockingQueue<ReliableProtocolPacket> _buffer;
+    private final LinkedBlockingQueue<OutboundPacket> _buffer;
     
     // This is a timer that will cause unacknowledged packets to be resent
-    private final ScheduledThreadPoolExecutor _timer;
+    private Timer _timer;
 
     // This is a counter that keeps track of the sequence number
     private int _sequenceNumber;
@@ -37,6 +35,8 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
     private volatile boolean _closed;
 
     public ReliableSender(InetAddress serverAddress, int serverPort, int windowSize, Logger logger) throws SocketException {
+        super(logger);
+
         _logger = logger;
 
         _closed = false;
@@ -46,18 +46,34 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
         _socket = new DatagramSocket();
         _bufferEmpty = new Object();
 
-        _buffer = new LinkedBlockingQueue<ReliableProtocolPacket>(windowSize);
+        _buffer = new LinkedBlockingQueue<OutboundPacket>(windowSize);
         _sequenceNumber = 0;
         
-        _timer = new ScheduledThreadPoolExecutor(1);
-        
         var controlChannel = new Thread(() -> {
-            var packet = new DatagramPacket(new byte[150], 150);
+            // The packets we expect to receive only contain: Sequence Number (4 bytes) Checksum (4 bytes) 
+            // if there any additional bytes then they can be ignored
+            var packet = new DatagramPacket(new byte[2 * Integer.BYTES], 2 * Integer.BYTES);
+
             while (!_closed) {
                 try {
-                    _socket.receive(packet);
-                    handleReceivedPacket(packet);
+                    try {
+                        _socket.receive(packet);
+                    } catch (SocketException e) {
+                        // This exception occurs when the socket closes.
+                        // We can ignore it and the loop will exit.
+                        continue;
+                    }
+
+                    if (_buffer.isEmpty()) {
+                        // If the buffer is empty then we do not need to inspect the contents of the packets
+                        _logger.log("Ignoring packet, there are no unacknowledged packets");
+                    } else {
+                        // We have unacknowledged packets so we need to deserialize the packet and deal with it
+                        // appropriately
+                        handleACKPacket(packet);
+                    }
                 } catch (IOException e) {
+                    _logger.log("An error occurred on the control channel %s", e);
                 }
             }
         });
@@ -65,7 +81,7 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
         controlChannel.start();
     }
     
-    public void send(byte[] data) throws IOException, InterruptedException {
+    public void send(Byte data) throws IOException, InterruptedException {
         var packet = makePacket(_sequenceNumber, data, _serverAddress, _serverPort);
 
         // Keep a copy of the packet in case in needs to be resent
@@ -78,11 +94,7 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
 
         _sequenceNumber += 1;
 
-        // Start the the timer if it isn't already running.
-        if (_timer.getQueue().isEmpty()) {
-            _logger.log("Starting timer.");
-            startTimer();
-        }
+        startTimer();
     }
 
     public void waitUntilEmpty() throws InterruptedException {
@@ -93,68 +105,68 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
         }
     }
 
-    private void startTimer() {
-        _timer.scheduleAtFixedRate(
-            () -> {
-                try {
-                    _logger.log("Time out. Resending unacknowledged packets.");
-
-                    for (var packet: _buffer) {
-                        _socket.send(packet.getPacket());
-                        _logger.log("Re-sent packet %d", packet.getSequenceNumber());
+    private synchronized void startTimer() {
+        if (_timer == null) {
+            _timer = new Timer();
+            _timer.scheduleAtFixedRate(
+                new TimerTask() {
+                    @Override
+                    public void run() {
+                        try {
+                            _logger.log("Time out. Resending unacknowledged packets.");
+    
+                            for (var packet: _buffer) {
+                                _socket.send(packet.getPacket());
+                                _logger.log("Re-sent packet %d", packet.getSequenceNumber());
+                            }
+                        } catch (IOException e) {
+                            _logger.log("An error occurred while resending unacknowledged packets: %s", e);
+                        }
                     }
-                } catch (IOException e) {
-                }
-            }, 
-            2, 
-            2, 
-            TimeUnit.SECONDS
-        );
+                }, 
+                2000, 
+                2000
+            );
+        }
     }
 
-    private void handleReceivedPacket(DatagramPacket packet) throws IOException {
+    private void handleACKPacket(DatagramPacket packet) throws IOException {
         stopTimer();
         
-        var data = packet.getData();
-        var dataLength = packet.getLength();
-
-        _logger.log("Received a packet with length %d", dataLength);
-
-        try (var stream = new DataInputStream(new ByteArrayInputStream(data, 0, packet.getLength()))) {
-            var ackedSequenceNumber = stream.readInt();
-            _logger.log("Received packet has sequence number: %d", ackedSequenceNumber);
-            
-            var expectedChecksum = stream.readInt();
-            var receivedPayload = stream.readAllBytes();
-            var actualChecksum = calculateChecksum(ackedSequenceNumber, receivedPayload);
-            
-            if (actualChecksum != expectedChecksum) {
-                _logger.log("Ignoring received packet. The checksum (%d) did not match the expected value (%d).", actualChecksum, expectedChecksum);
+        try {
+            var receivedPacket = deserializeDatagram(packet);
+            if (receivedPacket == null) {
                 return;
             }
 
-            _logger.log("Received Packet has expected checksum: %d", expectedChecksum);
+            _logger.log("Received Packet has sequence number %d expected checksum: %d", receivedPacket.getSequenceNumber(), receivedPacket.getCheckSum());
 
             // Look for the packet(s) that has been ACKed.
             // By examining the oldest packet we have, we can calculate the full range of sequence numbers and where they are
             // in the queue.
-            var pendingPacket = _buffer.peek();
+            var oldestUnackedPacket = _buffer.peek();
 
-            if (pendingPacket == null || pendingPacket.getSequenceNumber() > ackedSequenceNumber) {
-                // The buffer is empty or the sequence number is earlier than the oldest sequence number that is pending
+            if (oldestUnackedPacket.getSequenceNumber() > receivedPacket.getSequenceNumber()) {
+                _logger.log("The packet has already been ACKED: %d", receivedPacket.getSequenceNumber());
                 return;
             }
 
             // Calculate how many packets we can acknowledge
-            var ackedPacketCount = (ackedSequenceNumber - pendingPacket.getSequenceNumber()) + 1;
+            var ackedPacketCount = (receivedPacket.getSequenceNumber() - oldestUnackedPacket.getSequenceNumber()) + 1;
 
             if (ackedPacketCount > _buffer.size()) {
-                // The acked sequence number is further into the future so the packet has been sent yet
+                // The sequence number is for a packet that hasn't been sent yet
+                _logger.log("The packet has never been sent: %d", receivedPacket.getSequenceNumber());
                 return;
             }
 
-            _logger.log("ACKING %d packets between %d and %d", ackedPacketCount, pendingPacket.getSequenceNumber(), ackedSequenceNumber);
-            Collection<ReliableProtocolPacket> ackedPackets = new ArrayList<ReliableProtocolPacket>(ackedPacketCount);
+            if (ackedPacketCount == 1) {
+                _logger.log("ACKING packet %d", receivedPacket.getSequenceNumber());
+            } else {
+                _logger.log("ACKING %d packets between %d and %d", ackedPacketCount, oldestUnackedPacket.getSequenceNumber(), receivedPacket.getSequenceNumber());
+            }
+            
+            Collection<OutboundPacket> ackedPackets = new ArrayList<OutboundPacket>(ackedPacketCount);
             _buffer.drainTo(ackedPackets, ackedPacketCount);
         } finally {
             if (!_buffer.isEmpty()) {
@@ -169,14 +181,17 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
         }
     }
 
-    private void stopTimer() {
-        _timer.getQueue().clear();
+    private synchronized void stopTimer() {
+        if (_timer != null) {
+            _timer.cancel();
+            _timer = null;
+        }
     }
 
     @Override
     public void close() throws IOException {
         _closed = true;
-        _timer.shutdownNow();
+        stopTimer();
         _socket.close();
     }
 }

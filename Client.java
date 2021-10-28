@@ -19,18 +19,13 @@ public class Client {
             logger.log("Sending %s to %s:%s with a window size %d", filePath, receiverAddress, receiverPort, windowSize);
 
             try (var client = new ReliableSender(receiverAddress, receiverPort, windowSize, logger)) {
-                
-                // Send a single byte at a time to illustrate the STOP and WAIT nature of the protocol
-                // for (byte b: fileContent) {
-                //     client.send(new byte[] { b });
-                // }
-
-                client.send(new byte[] { 90 });
-                client.send(new byte[] { 90, 90 });
-                client.send(new byte[] { 90, 90, 90 });
+                //Send a single byte at a time to illustrate the STOP and WAIT nature of the protocol
+                for (byte b: fileContent) {
+                    client.send(b);
+                }
 
                 // Send an empty packet to symbolise the end of the data
-                client.send(new byte[0]);
+                client.send(null);
 
                 logger.log("Waiting for all packets to be delivered.");
                 client.waitUntilEmpty();

@@ -10,6 +10,6 @@ public class Logger {
 
     public void log(String format, Object... args) {
         var logMessage = String.format(format, args);
-        _target.println(String.format("%s :- %s", LocalDateTime.now().toString(), logMessage));
+        _target.println(String.format("%s :- %s", LocalDateTime.now().toLocalTime().toString(), logMessage));
     }
 }

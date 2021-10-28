@@ -1,9 +1,8 @@
-import java.io.ByteArrayInputStream;
 import java.io.Closeable;
-import java.io.DataInputStream;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.SocketAddress;
 import java.net.SocketException;
 import java.util.function.Consumer;
 
@@ -11,24 +10,27 @@ public class ReliableReceiver extends ReliableParticipant implements Closeable {
     private final DatagramSocket _socket;
     private final DatagramPacket _packet;
     private final Logger _logger;
-    private final byte[] _emptyData;
 
     private volatile boolean _listening;
-    private ReliableProtocolPacket _lastAckedPacket;
 
+    private SocketAddress _currentClient;
     private int _expectedSequenceNumber;
 
     public ReliableReceiver(int port, Logger logger) throws SocketException {
-        _socket = new DatagramSocket(port);
-        _packet = new DatagramPacket(new byte[3 * Integer.BYTES], 3 * Integer.BYTES);
-        _logger = logger;
-        _emptyData = new byte[0];
-        _lastAckedPacket = null;
+        super(logger);
 
+        // The largest packet we expect is Sequence Number + CheckSum + 1 byte of data
+        var bufferSize = 2 * Integer.BYTES + 1;
+
+        _socket = new DatagramSocket(port);
+        _packet = new DatagramPacket(new byte[bufferSize], bufferSize);
+        _logger = logger;
+
+        _currentClient = null;
         _expectedSequenceNumber = 0;
     }
     
-    public void startListening(Consumer<byte[]> onDataReceived) throws IOException {
+    public void startListening(Consumer<Byte> onDataReceived) throws IOException {
         _listening = true;
 
         while (_listening) {
@@ -40,57 +42,48 @@ public class ReliableReceiver extends ReliableParticipant implements Closeable {
         _listening = false;
     }
 
-    private void receive(Consumer<byte[]> onDataReceived) throws IOException {
+    private void receive(Consumer<Byte> onDataReceived) throws IOException {
         _socket.receive(_packet);
         
-        var data = _packet.getData();
-        var dataLength = _packet.getLength();
+        var receivedPacket = deserializeDatagram(_packet);
 
-        _logger.log("Received a packet with length %d", dataLength);
-
-        try (var buffer = new ByteArrayInputStream(data, 0, dataLength)) {
-            try (var stream = new DataInputStream(buffer)) {
-                var sequenceNumber = stream.readInt();
-                _logger.log("Packet has sequence number: %d", sequenceNumber);
-                
-                if (sequenceNumber != _expectedSequenceNumber) {
-                    _logger.log("Unexpected sequence number: %d", _expectedSequenceNumber);
-                    resendLastAck();
-                    return;
-                }
-        
-                var expectedChecksum = stream.readInt();
-                
-                var payload = stream.readAllBytes();
-                
-                var actualChecksum = calculateChecksum(sequenceNumber, payload);
-                
-                if (actualChecksum != expectedChecksum) {
-                    _logger.log("The checksum (%d) did not match the expected value (%d).", actualChecksum, expectedChecksum);
-                    resendLastAck();
-                    return;
-                }
-                
-                _logger.log("Received packet has expected checksum: %d", expectedChecksum);
-        
-                onDataReceived.accept(payload);
-    
-                _logger.log("Sending ACK for %d", sequenceNumber);
-                _lastAckedPacket = makePacket(sequenceNumber, _emptyData, _packet.getAddress(), _packet.getPort());
-                _socket.send(_lastAckedPacket.getPacket());
-            }
+        if (receivedPacket == null) {
+            return;
         }
+
+        if (!_packet.getSocketAddress().equals(_currentClient)) {
+            _currentClient = _packet.getSocketAddress();
+            _expectedSequenceNumber = 0;
+            _logger.log("New client connection: %s. Expected sequence has been reset to 0.", _currentClient);
+        }
+
+        if (receivedPacket.getSequenceNumber() != _expectedSequenceNumber) {
+            _logger.log("Unexpected sequence number: %d", receivedPacket.getSequenceNumber());
+            resendLastAck();
+            return;
+        }
+        
+        _logger.log("Received packet has expected sequence %d and checksum: %d", receivedPacket.getSequenceNumber(), receivedPacket.getCheckSum());
+
+        onDataReceived.accept(receivedPacket.getData());
+
+        _logger.log("Sending ACK for %d", receivedPacket.getSequenceNumber());
+        var packet = makePacket(receivedPacket.getSequenceNumber(), null, _packet.getAddress(), _packet.getPort());
+        _socket.send(packet.getPacket());
         
         _expectedSequenceNumber += 1;
     }
 
     private void resendLastAck() throws IOException {
-        if (_lastAckedPacket == null) {
+        if (_expectedSequenceNumber == 0) {
             return;
         }
 
-        _logger.log("Re-sending ACK for %d.", _lastAckedPacket.getSequenceNumber());
-        _socket.send(_lastAckedPacket.getPacket());
+        var lastAckedSequenceNumber = _expectedSequenceNumber - 1;
+
+        _logger.log("Re-sending ACK for %d.", lastAckedSequenceNumber);
+        var packet = makePacket(lastAckedSequenceNumber, null, _packet.getAddress(), _packet.getPort());
+        _socket.send(packet.getPacket());
     }
 
     @Override
