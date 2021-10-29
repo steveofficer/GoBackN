@@ -19,8 +19,8 @@ public class ReliableReceiver extends ReliableParticipant implements Closeable {
     public ReliableReceiver(int port, Logger logger) throws SocketException {
         super(logger);
 
-        // The largest packet we expect is Sequence Number + CheckSum + 1 byte of data
-        var bufferSize = 2 * Integer.BYTES + 1;
+        // The largest packet we expect has a packet header and 1 byte of data
+        var bufferSize = PACKET_HEADER_SIZE + 1;
 
         _socket = new DatagramSocket(port);
         _packet = new DatagramPacket(new byte[bufferSize], bufferSize);
@@ -63,7 +63,7 @@ public class ReliableReceiver extends ReliableParticipant implements Closeable {
             return;
         }
         
-        _logger.log("Received packet has expected sequence %d and checksum: %d", receivedPacket.getSequenceNumber(), receivedPacket.getCheckSum());
+        _logger.log("Received packet with expected sequence number %d", receivedPacket.getSequenceNumber());
 
         onDataReceived.accept(receivedPacket.getData());
 

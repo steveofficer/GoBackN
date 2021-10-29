@@ -50,9 +50,9 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
         _sequenceNumber = 0;
         
         var controlChannel = new Thread(() -> {
-            // The packets we expect to receive only contain: Sequence Number (4 bytes) Checksum (4 bytes) 
-            // if there any additional bytes then they can be ignored
-            var packet = new DatagramPacket(new byte[2 * Integer.BYTES], 2 * Integer.BYTES);
+            // The packets we expect to receive only have a packet header.
+            // Any data portion that gets received will be ignored.
+            var packet = new DatagramPacket(new byte[PACKET_HEADER_SIZE], PACKET_HEADER_SIZE);
 
             while (!_closed) {
                 try {
@@ -98,6 +98,7 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
     }
 
     public void waitUntilEmpty() throws InterruptedException {
+        _logger.log("Waiting for all packets to be delivered.");
         synchronized(_bufferEmpty) {
             while (!_buffer.isEmpty()) {
                 _bufferEmpty.wait();
@@ -139,7 +140,7 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
                 return;
             }
 
-            _logger.log("Received Packet has sequence number %d expected checksum: %d", receivedPacket.getSequenceNumber(), receivedPacket.getCheckSum());
+            _logger.log("Received ACK for sequence number %d", receivedPacket.getSequenceNumber());
 
             // Look for the packet(s) that has been ACKed.
             // By examining the oldest packet we have, we can calculate the full range of sequence numbers and where they are
@@ -147,7 +148,7 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
             var oldestUnackedPacket = _buffer.peek();
 
             if (oldestUnackedPacket.getSequenceNumber() > receivedPacket.getSequenceNumber()) {
-                _logger.log("The packet has already been ACKED: %d", receivedPacket.getSequenceNumber());
+                _logger.log("The packet with sequence number %d has already been ACKED", receivedPacket.getSequenceNumber());
                 return;
             }
 
@@ -156,14 +157,14 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
 
             if (ackedPacketCount > _buffer.size()) {
                 // The sequence number is for a packet that hasn't been sent yet
-                _logger.log("The packet has never been sent: %d", receivedPacket.getSequenceNumber());
+                _logger.log("The packet with sequence number %d has never been sent", receivedPacket.getSequenceNumber());
                 return;
             }
 
             if (ackedPacketCount == 1) {
-                _logger.log("ACKING packet %d", receivedPacket.getSequenceNumber());
+                _logger.log("Packet %d has been ACKED", receivedPacket.getSequenceNumber());
             } else {
-                _logger.log("ACKING %d packets between %d and %d", ackedPacketCount, oldestUnackedPacket.getSequenceNumber(), receivedPacket.getSequenceNumber());
+                _logger.log("%d packets between %d and %d have been ACKED", ackedPacketCount, oldestUnackedPacket.getSequenceNumber(), receivedPacket.getSequenceNumber());
             }
             
             Collection<OutboundPacket> ackedPackets = new ArrayList<OutboundPacket>(ackedPacketCount);
@@ -193,5 +194,6 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
         _closed = true;
         stopTimer();
         _socket.close();
+        _logger.log("Sender closed.");
     }
 }

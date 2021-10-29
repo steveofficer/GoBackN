@@ -9,9 +9,16 @@ import java.nio.ByteBuffer;
 import java.util.zip.CRC32;
 
 // This is a base class for the Sender and Receiver to centralise shared functionality
-// such as checksum calculation and packet creation
+// such as checksum calculation, packet serialization and packet deserialization.
 abstract class ReliableParticipant {
     protected final Logger _logger;
+
+    // The packet header consists of:
+    //  - A Sequence Number (int: 4 bytes)
+    //  - A checksum (int: 4 bytes)
+    // This is also the size of the smallest packet that we can send or receive
+    // Packets with no data are used by the receiver to indicate an ACK, and by the sender to indicate a FIN.
+    protected final int PACKET_HEADER_SIZE = 2 * Integer.BYTES;
 
     ReliableParticipant(Logger logger) {
         _logger = logger;
@@ -29,11 +36,8 @@ abstract class ReliableParticipant {
     }
 
     protected OutboundPacket makePacket(int sequenceNumber, Byte data, InetAddress recipientAddress, int recipientPort) throws IOException {
-        // The protocol uses packets with the following fields
-        //   - Sequence Number (int: 4 bytes)
-        //   - Checksum (int: 4 bytes)
-        //   - Data (0 or 1 byte)
-        var packetSize = 2 * Integer.BYTES + (data == null ? 0 : 1);
+        var packetSize = PACKET_HEADER_SIZE + (data == null ? 0 : 1);
+
         try (var buffer = new ByteArrayOutputStream(packetSize)) {
             try (var stream = new DataOutputStream(buffer)) {
                 // Add sequence number to the packet
@@ -60,8 +64,8 @@ abstract class ReliableParticipant {
         var dataLength = packet.getLength();
 
         _logger.log("Deserialize packet with length %d", dataLength);
-        if (dataLength < 2 * Integer.BYTES) {
-            // The smallest packet we can receive must have at least a sequence number and checksum
+        if (dataLength < PACKET_HEADER_SIZE) {
+            
             _logger.log("The received packet has insufficient data.");
             return null;
         }
@@ -70,12 +74,14 @@ abstract class ReliableParticipant {
             try (var stream = new DataInputStream(buffer)) {
                 var sequenceNumber = stream.readInt();
                 var expectedChecksum = stream.readInt();
+
+                // Only read the data if it is present in the received data
                 var payload = stream.available() == 0 ? null : stream.readByte();
                 
                 var actualChecksum = calculateChecksum(sequenceNumber, payload);
                 
                 if (actualChecksum != expectedChecksum) {
-                    _logger.log("Corrupt packet detected. The calculated checksum (%d) did not match the expected value (%d).", actualChecksum, expectedChecksum);
+                    _logger.log("Corrupt packet detected.");
                     return null;
                 }
 
