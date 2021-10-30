@@ -14,7 +14,7 @@ public class ReliableReceiver extends ReliableParticipant implements Closeable {
     private volatile boolean _listening;
 
     private SocketAddress _currentClient;
-    private int _expectedSequenceNumber;
+    private short _expectedSequenceNumber;
 
     public ReliableReceiver(int port, Logger logger) throws SocketException {
         super(logger);
@@ -79,7 +79,7 @@ public class ReliableReceiver extends ReliableParticipant implements Closeable {
             return;
         }
 
-        var lastAckedSequenceNumber = _expectedSequenceNumber - 1;
+        var lastAckedSequenceNumber = (short)(_expectedSequenceNumber - 1);
 
         _logger.log("Re-sending ACK for %d.", lastAckedSequenceNumber);
         var packet = makePacket(lastAckedSequenceNumber, null, _packet.getAddress(), _packet.getPort());

@@ -28,8 +28,8 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
     // This is a timer that will cause unacknowledged packets to be resent
     private Timer _timer;
 
-    // This is a counter that keeps track of the sequence number
-    private int _sequenceNumber;
+    // This is a counter that keeps track of the next sequence number to use
+    private short _sequenceNumber;
 
     // This indicates to background threads that the sender is being closed and the thread should stop
     private volatile boolean _closed;

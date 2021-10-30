@@ -14,7 +14,7 @@ public class Client {
             int windowSize = Integer.parseInt(args[2]);
             Path filePath = Paths.get(args[3]);
 
-            // Assume that the file contains UTF-8 encoded text
+            // Assume that the file already contains UTF-8 encoded text and no specific re-encoding is required
             var fileContent = Files.readAllBytes(filePath);
 
             logger.log("Sending data from %s to %s:%s with a window size of %d", filePath, receiverAddress, receiverPort, windowSize);
