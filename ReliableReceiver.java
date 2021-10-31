@@ -63,7 +63,7 @@ public class ReliableReceiver extends ReliableParticipant implements Closeable {
             return;
         }
         
-        _logger.log("Received packet with expected sequence number %d", receivedPacket.getSequenceNumber());
+        _logger.log("Received packet with sequence number %d", receivedPacket.getSequenceNumber());
 
         onDataReceived.accept(receivedPacket.getData());
 

@@ -29,6 +29,7 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
     private Timer _timer;
 
     // This is a counter that keeps track of the next sequence number to use
+    // There is the assumption that this always stays within the interval [0, 32767]
     private short _sequenceNumber;
 
     // This indicates to background threads that the sender is being closed and the thread should stop
@@ -152,7 +153,7 @@ public class ReliableSender extends ReliableParticipant implements java.io.Close
                 return;
             }
 
-            // Calculate how many packets we can acknowledge
+            // Calculate how many packets we can acknowledge. 
             var ackedPacketCount = (receivedPacket.getSequenceNumber() - oldestUnackedPacket.getSequenceNumber()) + 1;
 
             if (ackedPacketCount > _buffer.size()) {
